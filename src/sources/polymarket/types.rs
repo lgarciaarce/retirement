@@ -66,25 +66,33 @@ pub enum PolymarketWsEvent {
     #[serde(rename = "book")]
     Book {
         asset_id: String,
+        market: String,
         bids: Vec<PolymarketLevel>,
         asks: Vec<PolymarketLevel>,
         timestamp: Option<String>,
     },
     #[serde(rename = "price_change")]
     PriceChange {
-        asset_id: String,
-        price: String,
+        market: String,
+        price_changes: Vec<PolymarketPriceChange>,
+        timestamp: Option<String>,
     },
     #[serde(rename = "last_trade_price")]
     LastTradePrice {
         asset_id: String,
+        market: String,
         price: String,
+        size: String,
+        side: String,
+        timestamp: Option<String>,
     },
-    #[serde(rename = "best_bid_ask")]
-    BestBidAsk {
+    #[serde(rename = "tick_size_change")]
+    TickSizeChange {
         asset_id: String,
-        best_bid: String,
-        best_ask: String,
+        market: String,
+        old_tick_size: String,
+        new_tick_size: String,
+        timestamp: Option<String>,
     },
 }
 
@@ -94,10 +102,20 @@ pub struct PolymarketLevel {
     pub size: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct PolymarketPriceChange {
+    pub asset_id: String,
+    pub price: String,
+    pub size: String,
+    pub side: String,
+    pub best_bid: String,
+    pub best_ask: String,
+}
+
 impl PolymarketWsEvent {
-    pub fn into_orderbook_event(self) -> Option<OrderbookEvent> {
+    pub fn into_orderbook_events(self) -> Vec<OrderbookEvent> {
         match self {
-            PolymarketWsEvent::Book { asset_id, bids, asks, timestamp } => {
+            PolymarketWsEvent::Book { asset_id, market, bids, asks, timestamp } => {
                 let bids = bids
                     .into_iter()
                     .filter_map(|l| {
@@ -116,26 +134,32 @@ impl PolymarketWsEvent {
                         })
                     })
                     .collect();
-                Some(OrderbookEvent::Snapshot { asset_id, bids, asks, timestamp })
+                vec![OrderbookEvent::Snapshot { asset_id, market, bids, asks, timestamp }]
             }
-            PolymarketWsEvent::PriceChange { asset_id, price } => {
-                Some(OrderbookEvent::PriceChange {
-                    asset_id,
-                    price: price.parse().ok()?,
-                })
+            PolymarketWsEvent::PriceChange { market, price_changes, timestamp } => {
+                price_changes
+                    .into_iter()
+                    .filter_map(|pc| {
+                        Some(OrderbookEvent::PriceChange {
+                            asset_id: pc.asset_id,
+                            market: market.clone(),
+                            price: pc.price.parse().ok()?,
+                            size: pc.size.parse().ok()?,
+                            side: pc.side,
+                            best_bid: pc.best_bid.parse().ok()?,
+                            best_ask: pc.best_ask.parse().ok()?,
+                            timestamp: timestamp.clone(),
+                        })
+                    })
+                    .collect()
             }
-            PolymarketWsEvent::LastTradePrice { asset_id, price } => {
-                Some(OrderbookEvent::LastTrade {
-                    asset_id,
-                    price: price.parse().ok()?,
-                })
+            PolymarketWsEvent::LastTradePrice { asset_id, market, price, size, side, timestamp } => {
+                let Some(price) = price.parse().ok() else { return vec![] };
+                let Some(size) = size.parse().ok() else { return vec![] };
+                vec![OrderbookEvent::LastTrade { asset_id, market, price, size, side, timestamp }]
             }
-            PolymarketWsEvent::BestBidAsk { asset_id, best_bid, best_ask } => {
-                Some(OrderbookEvent::BestBidAsk {
-                    asset_id,
-                    best_bid: best_bid.parse().ok()?,
-                    best_ask: best_ask.parse().ok()?,
-                })
+            PolymarketWsEvent::TickSizeChange { .. } => {
+                vec![]
             }
         }
     }

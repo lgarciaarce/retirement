@@ -14,7 +14,7 @@ pub struct Cli {
     #[arg(long, default_value = "debug")]
     pub log_level: String,
 
-    /// Comma-separated token pairs (btc, eth, sol, doge)
-    #[arg(long, default_value = "btc,eth,sol,doge", value_delimiter = ',')]
+    /// Comma-separated token pairs (btc, eth, sol, xrp, doge)
+    #[arg(long, default_value = "btc", value_delimiter = ',')]
     pub pairs: Vec<String>,
 }

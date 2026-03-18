@@ -75,7 +75,7 @@ impl OrderbookSource for PolymarketWsClient {
                                     let text = msg.into_text().unwrap_or_default();
                                     match serde_json::from_str::<PolymarketWsEvent>(&text) {
                                         Ok(event) => {
-                                            if let Some(ob_event) = event.into_orderbook_event() {
+                                            for ob_event in event.into_orderbook_events() {
                                                 debug!("{}", ob_event);
                                                 if sender.send(ob_event).await.is_err() {
                                                     info!("Orderbook channel closed, stopping Polymarket WS");
@@ -85,7 +85,7 @@ impl OrderbookSource for PolymarketWsClient {
                                             }
                                         }
                                         Err(e) => {
-                                            debug!(error = %e, raw = %text, "Ignoring non-event Polymarket message");
+                                            warn!(error = %e, raw = %text, "Ignoring non-event Polymarket message");
                                         }
                                     }
                                 }
