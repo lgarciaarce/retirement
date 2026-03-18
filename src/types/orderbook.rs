@@ -159,6 +159,10 @@ impl OrderbookManager {
         self.books.iter()
     }
 
+    pub fn market_ids(&self) -> impl Iterator<Item = &String> {
+        self.market_assets.keys()
+    }
+
     fn resolve_info(&self, asset_id: &str) -> AssetInfo {
         self.assets.get(asset_id).copied().unwrap_or(AssetInfo {
             crypto: crate::types::CryptoPair::Btc,

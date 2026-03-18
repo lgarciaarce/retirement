@@ -1,3 +1,4 @@
+pub mod fees;
 pub mod in_memory;
 
 use crate::types::order::{Fill, Order, OrderId};
@@ -7,6 +8,7 @@ pub trait PortfolioReader: Send + Sync {
     fn position(&self, asset_id: &str) -> f64;
     fn pending_order_count(&self, asset_id: &str) -> usize;
     fn has_pending_orders(&self) -> bool;
+    fn balance(&self) -> f64;
 }
 
 /// Mutable portfolio manager — engine uses this to record orders and apply fills.

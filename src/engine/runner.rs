@@ -17,6 +17,10 @@ use crate::strategy::StrategyContext;
 use crate::types::order::{Fill, Order, OrderId, OrderStatus};
 use crate::types::{CryptoPair, OrderbookEvent, OrderbookManager, PriceTick};
 
+const MARKET_INTERVAL_SECS: u64 = 300;
+const STRATEGY_BUFFER_SECS: u64 = 15;
+const INITIAL_BALANCE: f64 = 10_000.0;
+
 pub struct Engine {
     config: AppConfig,
 }
@@ -40,7 +44,7 @@ impl Engine {
         let mut ob_manager = OrderbookManager::new();
 
         for &crypto in &self.config.pairs {
-            let slug = build_epoch_slug(crypto, 300); // 5m markets
+            let slug = build_epoch_slug(crypto, MARKET_INTERVAL_SECS);
             info!(pair = %crypto, slug = %slug, "Looking up market");
 
             match rest_client.get_market_by_slug(&slug).await {
@@ -101,49 +105,56 @@ impl Engine {
         // Initialize strategy, execution, and portfolio modules
         let mut strategies = build_default_strategies();
         let executor = SimulatedExecutor::new();
-        let mut portfolio = InMemoryPortfolio::new();
+        let mut portfolio = InMemoryPortfolio::new(INITIAL_BALANCE);
         let mut next_order_id: u64 = 1;
+        let mut was_active = false;
 
-        info!("Engine running. Press Ctrl+C to stop.");
+        info!(
+            balance = INITIAL_BALANCE,
+            buffer_secs = STRATEGY_BUFFER_SECS,
+            "Engine running. Press Ctrl+C to stop."
+        );
 
         // Main event loop
         loop {
+            let mut orders = Vec::new();
+            let active = is_strategy_window_active(MARKET_INTERVAL_SECS, STRATEGY_BUFFER_SECS);
+
+            if active != was_active {
+                if active {
+                    info!("Strategy window opened");
+                } else {
+                    info!("Strategy window closed (market boundary buffer)");
+                }
+                was_active = active;
+            }
+
             tokio::select! {
                 Some(tick) = tick_rx.recv() => {
                     trace!("Tick: {}", tick);
 
-                    // Run strategies on each tick
-                    let ctx = StrategyContext {
-                        tick: &tick,
-                        orderbooks: &ob_manager,
-                        portfolio: &portfolio,
-                    };
-                    let order_requests = strategies.on_tick(&ctx);
-
-                    // Process any emitted orders
-                    for req in order_requests {
-                        let order_id = OrderId(next_order_id);
-                        next_order_id += 1;
-
-                        let order = Order {
-                            id: order_id,
-                            request: req,
-                            status: OrderStatus::Pending,
-                            created_at: Instant::now(),
+                    if active {
+                        let ctx = StrategyContext {
+                            tick: Some(&tick),
+                            orderbooks: &ob_manager,
+                            portfolio: &portfolio,
                         };
-
-                        debug!(order = %order, "New order from strategy");
-                        portfolio.record_pending_order(&order);
-
-                        if let Err(e) = executor.submit(order, fill_tx.clone()).await {
-                            warn!(error = %e, "Failed to submit order to executor");
-                        }
+                        orders = strategies.on_tick(&ctx);
                     }
                 }
                 Some(ob) = ob_rx.recv() => {
                     trace!("OB event: {}", ob);
                     if let Some(snap) = ob_manager.apply(&ob) {
                         trace!("Orderbook updated:\n{}", snap);
+                    }
+
+                    if active {
+                        let ctx = StrategyContext {
+                            tick: None,
+                            orderbooks: &ob_manager,
+                            portfolio: &portfolio,
+                        };
+                        orders = strategies.on_orderbook_update(&ctx);
                     }
                 }
                 Some(fill) = fill_rx.recv() => {
@@ -155,10 +166,43 @@ impl Engine {
                     break;
                 }
             }
+
+            // Process any orders emitted by strategies
+            for req in orders {
+                let order_id = OrderId(next_order_id);
+                next_order_id += 1;
+
+                let order = Order {
+                    id: order_id,
+                    request: req,
+                    status: OrderStatus::Pending,
+                    created_at: Instant::now(),
+                };
+
+                debug!(order = %order, "New order from strategy");
+                portfolio.record_pending_order(&order);
+
+                if let Err(e) = executor.submit(order, fill_tx.clone()).await {
+                    warn!(error = %e, "Failed to submit order to executor");
+                }
+            }
         }
 
         Ok(())
     }
+}
+
+/// Check if strategies should be active based on the current position within
+/// the market epoch. Strategies are paused during the first and last
+/// `buffer_secs` seconds of each `interval_secs` epoch.
+fn is_strategy_window_active(interval_secs: u64, buffer_secs: u64) -> bool {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let epoch_start = (now / interval_secs) * interval_secs;
+    let elapsed = now - epoch_start;
+    elapsed >= buffer_secs && elapsed <= interval_secs - buffer_secs
 }
 
 /// Build the epoch slug for a given pair and interval.

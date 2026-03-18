@@ -1,3 +1,4 @@
+use super::arb_logger::ArbLoggerStrategy;
 use super::spread_logger::SpreadLoggerStrategy;
 use super::{Strategy, StrategyContext};
 use crate::types::order::OrderRequest;
@@ -14,15 +15,21 @@ impl StrategyRegistry {
     }
 
     pub fn register(&mut self, strategy: Box<dyn Strategy>) {
-        strategy.name(); // force borrow just to log at callsite if needed
         self.strategies.push(strategy);
     }
 
     pub fn on_tick(&mut self, ctx: &StrategyContext) -> Vec<OrderRequest> {
         let mut all_orders = Vec::new();
         for strategy in &mut self.strategies {
-            let orders = strategy.on_tick(ctx);
-            all_orders.extend(orders);
+            all_orders.extend(strategy.on_tick(ctx));
+        }
+        all_orders
+    }
+
+    pub fn on_orderbook_update(&mut self, ctx: &StrategyContext) -> Vec<OrderRequest> {
+        let mut all_orders = Vec::new();
+        for strategy in &mut self.strategies {
+            all_orders.extend(strategy.on_orderbook_update(ctx));
         }
         all_orders
     }
@@ -37,6 +44,7 @@ impl Default for StrategyRegistry {
 pub fn build_default_strategies() -> StrategyRegistry {
     let mut r = StrategyRegistry::new();
     r.register(Box::new(SpreadLoggerStrategy::new()));
+    r.register(Box::new(ArbLoggerStrategy::new()));
     // Add new strategies here
     r
 }

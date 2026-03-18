@@ -9,6 +9,10 @@ use crate::types::order::{Fill, Order};
 
 use super::OrderExecutor;
 
+fn round2(x: f64) -> f64 {
+    (x * 100.0).round() / 100.0
+}
+
 pub struct SimulatedExecutor {
     latency: Duration,
 }
@@ -49,8 +53,8 @@ impl OrderExecutor for SimulatedExecutor {
                 order_id: order.id,
                 asset_id: order.request.asset_id.clone(),
                 side: order.request.side,
-                price: fill_price,
-                size: order.request.size,
+                price: round2(fill_price),
+                size: round2(order.request.size),
                 filled_at: Instant::now(),
             };
 
