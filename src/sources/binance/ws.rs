@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tokio_tungstenite::connect_async;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::error::Result;
 use crate::sources::PriceSource;
@@ -53,7 +53,7 @@ impl PriceSource for BinanceWsClient {
                                     match serde_json::from_str::<BinanceCombinedStream>(&text) {
                                         Ok(combined) => {
                                             if let Some(tick) = combined.data.into_tick() {
-                                                debug!("{}", tick);
+                                                trace!("{}", tick);
                                                 if sender.send(tick).await.is_err() {
                                                     info!("Price channel closed, stopping Binance WS");
                                                     return Ok(());
@@ -61,13 +61,13 @@ impl PriceSource for BinanceWsClient {
                                             }
                                         }
                                         Err(e) => {
-                                            warn!(error = %e, "Failed to deserialize Binance message");
+                                            error!(error = %e, "Failed to deserialize Binance message");
                                         }
                                     }
                                 }
                             }
                             Some(Err(e)) => {
-                                warn!(error = %e, "Binance WebSocket read error");
+                                error!(error = %e, "Binance WebSocket read error");
                                 break;
                             }
                             None => {

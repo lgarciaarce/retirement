@@ -3,12 +3,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, trace, warn};
 
-use crate::config::settings::{AppConfig, OperationMode, TokenPairConfig};
+use crate::config::settings::{AppConfig, OperationMode};
 use crate::error::Result;
 use crate::sources::binance::BinanceWsClient;
 use crate::sources::polymarket::{PolymarketRestClient, PolymarketWsClient};
 use crate::sources::{MarketClient, OrderbookSource, PriceSource};
-use crate::types::{OrderbookEvent, OrderbookManager, PriceTick};
+use crate::types::{CryptoPair, OrderbookEvent, OrderbookManager, PriceTick};
 
 pub struct Engine {
     config: AppConfig,
@@ -30,24 +30,29 @@ impl Engine {
         // Discover markets for each pair
         let rest_client = PolymarketRestClient::new();
         let mut all_asset_ids: Vec<String> = Vec::new();
+        let mut ob_manager = OrderbookManager::new();
 
-        for pair in &self.config.pairs {
-            let slug = build_epoch_slug(pair, 300); // 5m markets
-            info!(pair = %pair.name, slug = %slug, "Looking up market");
+        for &crypto in &self.config.pairs {
+            let slug = build_epoch_slug(crypto, 300); // 5m markets
+            info!(pair = %crypto, slug = %slug, "Looking up market");
 
             match rest_client.get_market_by_slug(&slug).await {
                 Ok(market) => {
                     info!(
-                        pair = %pair.name,
+                        pair = %crypto,
                         question = %market.question,
                         active = market.active,
                         tokens = ?market.clob_token_ids,
                         "Discovered market"
                     );
-                    all_asset_ids.extend(market.clob_token_ids);
+                    for (asset_id, asset_info) in market.extract_assets(crypto) {
+                        info!(asset_id = %asset_id, info = %asset_info, "Registered asset");
+                        ob_manager.register_asset(&market.id, &asset_id, asset_info);
+                        all_asset_ids.push(asset_id);
+                    }
                 }
                 Err(e) => {
-                    warn!(pair = %pair.name, slug = %slug, error = %e, "Failed to fetch market, continuing without it");
+                    warn!(pair = %crypto, slug = %slug, error = %e, "Failed to fetch market, continuing without it");
                 }
             }
         }
@@ -83,8 +88,6 @@ impl Engine {
         drop(tick_tx);
         drop(ob_tx);
 
-        let mut ob_manager = OrderbookManager::new();
-
         info!("Engine running. Press Ctrl+C to stop.");
 
         // Main event loop
@@ -111,8 +114,7 @@ impl Engine {
 }
 
 /// Build the epoch slug for a given pair and interval.
-/// E.g. "btc-updown-5m-1710770400"
-fn build_epoch_slug(pair: &TokenPairConfig, interval_secs: u64) -> String {
+fn build_epoch_slug(crypto: CryptoPair, interval_secs: u64) -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -125,5 +127,5 @@ fn build_epoch_slug(pair: &TokenPairConfig, interval_secs: u64) -> String {
         _ => "5m",
     };
 
-    format!("{}-{}-{}", pair.polymarket_slug_prefix, interval_label, epoch)
+    format!("{}-{}-{}", crypto.slug_prefix(), interval_label, epoch)
 }

@@ -1,6 +1,8 @@
 use std::fmt;
 use std::str::FromStr;
 
+use crate::types::CryptoPair;
+
 #[derive(Debug, Clone)]
 pub enum OperationMode {
     Live,
@@ -35,36 +37,10 @@ impl FromStr for OperationMode {
 }
 
 #[derive(Debug, Clone)]
-pub struct TokenPairConfig {
-    pub name: String,
-    pub binance_symbol: String,
-    pub polymarket_slug_prefix: String,
-}
-
-impl TokenPairConfig {
-    pub fn from_name(name: &str) -> Option<Self> {
-        let (binance_symbol, slug_prefix) = match name.to_lowercase().as_str() {
-            "btc" => ("btcusdt", "btc-updown"),
-            "eth" => ("ethusdt", "eth-updown"),
-            "sol" => ("solusdt", "sol-updown"),
-            "xrp" => ("xrpusdt", "xrp-updown"),
-            "doge" => ("dogeusdt", "doge-updown"),
-            _ => return None,
-        };
-
-        Some(TokenPairConfig {
-            name: name.to_lowercase(),
-            binance_symbol: binance_symbol.to_string(),
-            polymarket_slug_prefix: slug_prefix.to_string(),
-        })
-    }
-}
-
-#[derive(Debug, Clone)]
 pub struct AppConfig {
     pub mode: OperationMode,
     pub log_level: String,
-    pub pairs: Vec<TokenPairConfig>,
+    pub pairs: Vec<CryptoPair>,
 }
 
 impl AppConfig {
@@ -72,10 +48,7 @@ impl AppConfig {
         let pairs: Result<Vec<_>, _> = cli
             .pairs
             .iter()
-            .map(|p| {
-                TokenPairConfig::from_name(p)
-                    .ok_or_else(|| format!("Unknown pair '{}'. Supported: btc, eth, sol, doge", p))
-            })
+            .map(|p| p.parse::<CryptoPair>())
             .collect();
 
         Ok(AppConfig {
@@ -86,6 +59,9 @@ impl AppConfig {
     }
 
     pub fn binance_symbols(&self) -> Vec<String> {
-        self.pairs.iter().map(|p| p.binance_symbol.clone()).collect()
+        self.pairs
+            .iter()
+            .map(|p| p.binance_symbol().to_string())
+            .collect()
     }
 }

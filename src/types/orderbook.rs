@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use super::market::AssetInfo;
+
 #[derive(Debug, Clone)]
 pub struct PriceLevel {
     pub price: f64,
@@ -12,14 +14,16 @@ pub struct PriceLevel {
 #[derive(Debug, Clone)]
 pub struct OrderbookSnapshot {
     pub asset_id: String,
+    pub info: AssetInfo,
     pub bids: Vec<PriceLevel>,
     pub asks: Vec<PriceLevel>,
 }
 
 impl OrderbookSnapshot {
-    pub fn new(asset_id: String) -> Self {
+    pub fn new(asset_id: String, info: AssetInfo) -> Self {
         Self {
             asset_id,
+            info,
             bids: Vec::new(),
             asks: Vec::new(),
         }
@@ -47,7 +51,6 @@ impl OrderbookSnapshot {
             }
         } else if size > 0.0 {
             levels.push(PriceLevel { price, size });
-            // Re-sort only the affected side
             if side == "BUY" {
                 self.bids.sort_by(|a, b| b.price.partial_cmp(&a.price).unwrap());
             } else {
@@ -75,7 +78,7 @@ impl fmt::Display for OrderbookSnapshot {
         let bid_str = self.best_bid().map(|l| format!("{:.2}", l.price)).unwrap_or("-".into());
         let ask_str = self.best_ask().map(|l| format!("{:.2}", l.price)).unwrap_or("-".into());
 
-        writeln!(f, "  Orderbook {} | best_bid={} best_ask={}", &self.asset_id[..8.min(self.asset_id.len())], bid_str, ask_str)?;
+        writeln!(f, "  Orderbook {} ({}) | best_bid={} best_ask={}", &self.asset_id[..8.min(self.asset_id.len())], self.info, bid_str, ask_str)?;
 
         let depth = 5.min(self.bids.len().max(self.asks.len()));
         writeln!(f, "  {:>12} {:>12} | {:>12} {:>12}", "BID_SZ", "BID_PX", "ASK_PX", "ASK_SZ")?;
@@ -99,6 +102,10 @@ impl fmt::Display for OrderbookSnapshot {
 #[derive(Default)]
 pub struct OrderbookManager {
     books: HashMap<String, OrderbookSnapshot>,
+    /// asset_id → AssetInfo, registered during market discovery
+    assets: HashMap<String, AssetInfo>,
+    /// market_id → list of asset_ids belonging to that market
+    market_assets: HashMap<String, Vec<String>>,
 }
 
 impl OrderbookManager {
@@ -106,21 +113,49 @@ impl OrderbookManager {
         Self::default()
     }
 
+    /// Register an asset discovered from a market.
+    pub fn register_asset(&mut self, market_id: &str, asset_id: &str, info: AssetInfo) {
+        self.assets.insert(asset_id.to_string(), info);
+        self.market_assets
+            .entry(market_id.to_string())
+            .or_default()
+            .push(asset_id.to_string());
+    }
+
+    /// Get all asset_ids for a given market.
+    pub fn assets_for_market(&self, market_id: &str) -> &[String] {
+        self.market_assets.get(market_id).map_or(&[], |v| v.as_slice())
+    }
+
+    /// Get the AssetInfo for a given asset_id.
+    pub fn asset_info(&self, asset_id: &str) -> Option<&AssetInfo> {
+        self.assets.get(asset_id)
+    }
+
     /// Apply an event and return the updated snapshot for debug logging.
     pub fn apply(&mut self, event: &OrderbookEvent) -> Option<&OrderbookSnapshot> {
         match event {
             OrderbookEvent::Snapshot { asset_id, bids, asks, .. } => {
-                let snap = self.books.entry(asset_id.clone()).or_insert_with(|| OrderbookSnapshot::new(asset_id.clone()));
+                let info = self.resolve_info(asset_id);
+                let snap = self.books.entry(asset_id.clone()).or_insert_with(|| OrderbookSnapshot::new(asset_id.clone(), info));
                 snap.replace(bids.clone(), asks.clone());
                 Some(snap)
             }
             OrderbookEvent::PriceChange { asset_id, price, size, side, .. } => {
-                let snap = self.books.entry(asset_id.clone()).or_insert_with(|| OrderbookSnapshot::new(asset_id.clone()));
+                let info = self.resolve_info(asset_id);
+                let snap = self.books.entry(asset_id.clone()).or_insert_with(|| OrderbookSnapshot::new(asset_id.clone(), info));
                 snap.apply_level(*price, *size, side);
                 Some(snap)
             }
             OrderbookEvent::LastTrade { .. } => None,
         }
+    }
+
+    fn resolve_info(&self, asset_id: &str) -> AssetInfo {
+        self.assets.get(asset_id).copied().unwrap_or(AssetInfo {
+            crypto: crate::types::CryptoPair::Btc,
+            outcome: crate::types::Outcome::Up,
+        })
     }
 }
 
