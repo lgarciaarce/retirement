@@ -1,13 +1,20 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::config::settings::{AppConfig, OperationMode};
 use crate::error::Result;
+use crate::execution::simulated::SimulatedExecutor;
+use crate::execution::OrderExecutor;
+use crate::portfolio::in_memory::InMemoryPortfolio;
+use crate::portfolio::PortfolioManager;
 use crate::sources::binance::BinanceWsClient;
 use crate::sources::polymarket::{PolymarketRestClient, PolymarketWsClient};
 use crate::sources::{MarketClient, OrderbookSource, PriceSource};
+use crate::strategy::registry::build_default_strategies;
+use crate::strategy::StrategyContext;
+use crate::types::order::{Fill, Order, OrderId, OrderStatus};
 use crate::types::{CryptoPair, OrderbookEvent, OrderbookManager, PriceTick};
 
 pub struct Engine {
@@ -60,6 +67,7 @@ impl Engine {
         // Create channels
         let (tick_tx, mut tick_rx) = mpsc::channel::<PriceTick>(1024);
         let (ob_tx, mut ob_rx) = mpsc::channel::<OrderbookEvent>(1024);
+        let (fill_tx, mut fill_rx) = mpsc::channel::<Fill>(256);
 
         // Spawn Binance WS
         let binance_symbols = self.config.binance_symbols();
@@ -87,6 +95,14 @@ impl Engine {
         // Drop our copies so channels close when producers stop
         drop(tick_tx);
         drop(ob_tx);
+        // NOTE: fill_tx must NOT be dropped — it's cloned into executor tasks.
+        // Dropping it here would close fill_rx prematurely.
+
+        // Initialize strategy, execution, and portfolio modules
+        let mut strategies = build_default_strategies();
+        let executor = SimulatedExecutor::new();
+        let mut portfolio = InMemoryPortfolio::new();
+        let mut next_order_id: u64 = 1;
 
         info!("Engine running. Press Ctrl+C to stop.");
 
@@ -95,12 +111,44 @@ impl Engine {
             tokio::select! {
                 Some(tick) = tick_rx.recv() => {
                     trace!("Tick: {}", tick);
+
+                    // Run strategies on each tick
+                    let ctx = StrategyContext {
+                        tick: &tick,
+                        orderbooks: &ob_manager,
+                        portfolio: &portfolio,
+                    };
+                    let order_requests = strategies.on_tick(&ctx);
+
+                    // Process any emitted orders
+                    for req in order_requests {
+                        let order_id = OrderId(next_order_id);
+                        next_order_id += 1;
+
+                        let order = Order {
+                            id: order_id,
+                            request: req,
+                            status: OrderStatus::Pending,
+                            created_at: Instant::now(),
+                        };
+
+                        debug!(order = %order, "New order from strategy");
+                        portfolio.record_pending_order(&order);
+
+                        if let Err(e) = executor.submit(order, fill_tx.clone()).await {
+                            warn!(error = %e, "Failed to submit order to executor");
+                        }
+                    }
                 }
                 Some(ob) = ob_rx.recv() => {
                     trace!("OB event: {}", ob);
                     if let Some(snap) = ob_manager.apply(&ob) {
                         trace!("Orderbook updated:\n{}", snap);
                     }
+                }
+                Some(fill) = fill_rx.recv() => {
+                    debug!(fill = %fill, "Fill received");
+                    portfolio.apply_fill(&fill);
                 }
                 _ = tokio::signal::ctrl_c() => {
                     info!("Received Ctrl+C, shutting down");

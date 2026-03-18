@@ -22,6 +22,9 @@ pub enum AppError {
 
     #[error("Config error: {0}")]
     Config(String),
+
+    #[error("Execution error: {0}")]
+    Execution(String),
 }
 
 pub type Result<T> = std::result::Result<T, AppError>;

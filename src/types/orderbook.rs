@@ -151,6 +151,14 @@ impl OrderbookManager {
         }
     }
 
+    pub fn snapshot(&self, asset_id: &str) -> Option<&OrderbookSnapshot> {
+        self.books.get(asset_id)
+    }
+
+    pub fn all_snapshots(&self) -> impl Iterator<Item = (&String, &OrderbookSnapshot)> {
+        self.books.iter()
+    }
+
     fn resolve_info(&self, asset_id: &str) -> AssetInfo {
         self.assets.get(asset_id).copied().unwrap_or(AssetInfo {
             crypto: crate::types::CryptoPair::Btc,
