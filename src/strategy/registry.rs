@@ -1,5 +1,5 @@
 use super::arb_logger::ArbLoggerStrategy;
-use super::spread_logger::SpreadLoggerStrategy;
+// use super::spread_logger::SpreadLoggerStrategy;
 use super::{Strategy, StrategyContext};
 use crate::types::order::OrderRequest;
 
@@ -43,7 +43,7 @@ impl Default for StrategyRegistry {
 
 pub fn build_default_strategies() -> StrategyRegistry {
     let mut r = StrategyRegistry::new();
-    r.register(Box::new(SpreadLoggerStrategy::new()));
+    // r.register(Box::new(SpreadLoggerStrategy::new()));
     r.register(Box::new(ArbLoggerStrategy::new()));
     // Add new strategies here
     r

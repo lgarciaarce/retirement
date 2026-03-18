@@ -1,6 +1,7 @@
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::config::settings::{AppConfig, OperationMode};
@@ -38,42 +39,24 @@ impl Engine {
             return Ok(());
         }
 
-        // Discover markets for each pair
         let rest_client = PolymarketRestClient::new();
-        let mut all_asset_ids: Vec<String> = Vec::new();
         let mut ob_manager = OrderbookManager::new();
 
-        for &crypto in &self.config.pairs {
-            let slug = build_epoch_slug(crypto, MARKET_INTERVAL_SECS);
-            info!(pair = %crypto, slug = %slug, "Looking up market");
-
-            match rest_client.get_market_by_slug(&slug).await {
-                Ok(market) => {
-                    info!(
-                        pair = %crypto,
-                        question = %market.question,
-                        active = market.active,
-                        tokens = ?market.clob_token_ids,
-                        "Discovered market"
-                    );
-                    for (asset_id, asset_info) in market.extract_assets(crypto) {
-                        info!(asset_id = %asset_id, info = %asset_info, "Registered asset");
-                        ob_manager.register_asset(&market.id, &asset_id, asset_info);
-                        all_asset_ids.push(asset_id);
-                    }
-                }
-                Err(e) => {
-                    warn!(pair = %crypto, slug = %slug, error = %e, "Failed to fetch market, continuing without it");
-                }
-            }
-        }
+        // Initial market discovery
+        let asset_ids = discover_markets(
+            &rest_client,
+            &self.config.pairs,
+            &mut ob_manager,
+            MARKET_INTERVAL_SECS,
+        )
+        .await;
 
         // Create channels
         let (tick_tx, mut tick_rx) = mpsc::channel::<PriceTick>(1024);
         let (ob_tx, mut ob_rx) = mpsc::channel::<OrderbookEvent>(1024);
         let (fill_tx, mut fill_rx) = mpsc::channel::<Fill>(256);
 
-        // Spawn Binance WS
+        // Spawn Binance WS (lives across all epochs)
         let binance_symbols = self.config.binance_symbols();
         let binance_client = BinanceWsClient::new(binance_symbols);
         let tick_tx_clone = tick_tx.clone();
@@ -83,26 +66,15 @@ impl Engine {
             }
         });
 
-        // Spawn Polymarket WS
-        if !all_asset_ids.is_empty() {
-            let poly_ws = PolymarketWsClient::new(all_asset_ids);
-            let ob_tx_clone = ob_tx.clone();
-            tokio::spawn(async move {
-                if let Err(e) = poly_ws.subscribe(ob_tx_clone).await {
-                    error!(error = %e, "Polymarket WS task failed");
-                }
-            });
-        } else {
-            info!("No Polymarket asset IDs discovered, skipping WS subscription");
-        }
+        // Spawn initial Polymarket WS
+        let mut poly_ws_handle = spawn_poly_ws(asset_ids, &ob_tx);
 
-        // Drop our copies so channels close when producers stop
+        // Drop tick_tx — Binance WS holds its clone.
+        // ob_tx is kept alive — cloned for each new Polymarket WS task on epoch rolls.
         drop(tick_tx);
-        drop(ob_tx);
-        // NOTE: fill_tx must NOT be dropped — it's cloned into executor tasks.
-        // Dropping it here would close fill_rx prematurely.
 
         // Initialize strategy, execution, and portfolio modules
+        let mut current_epoch = current_epoch_secs(MARKET_INTERVAL_SECS);
         let mut strategies = build_default_strategies();
         let executor = SimulatedExecutor::new();
         let mut portfolio = InMemoryPortfolio::new(INITIAL_BALANCE);
@@ -112,6 +84,7 @@ impl Engine {
         info!(
             balance = INITIAL_BALANCE,
             buffer_secs = STRATEGY_BUFFER_SECS,
+            epoch = current_epoch,
             "Engine running. Press Ctrl+C to stop."
         );
 
@@ -128,6 +101,8 @@ impl Engine {
                 }
                 was_active = active;
             }
+
+            let epoch_deadline = next_epoch_deadline(MARKET_INTERVAL_SECS);
 
             tokio::select! {
                 Some(tick) = tick_rx.recv() => {
@@ -161,6 +136,34 @@ impl Engine {
                     debug!(fill = %fill, "Fill received");
                     portfolio.apply_fill(&fill);
                 }
+                _ = tokio::time::sleep_until(epoch_deadline) => {
+                    let new_epoch = current_epoch_secs(MARKET_INTERVAL_SECS);
+                    if new_epoch != current_epoch {
+                        current_epoch = new_epoch;
+                        info!(epoch = current_epoch, "Market epoch rolled — re-discovering markets");
+
+                        // Abort old Polymarket WS task
+                        if let Some(handle) = poly_ws_handle.take() {
+                            handle.abort();
+                        }
+
+                        // Clear stale orderbook state and drain buffered events
+                        ob_manager.clear();
+                        while ob_rx.try_recv().is_ok() {}
+
+                        // Discover new markets
+                        let asset_ids = discover_markets(
+                            &rest_client,
+                            &self.config.pairs,
+                            &mut ob_manager,
+                            MARKET_INTERVAL_SECS,
+                        )
+                        .await;
+
+                        // Spawn new Polymarket WS
+                        poly_ws_handle = spawn_poly_ws(asset_ids, &ob_tx);
+                    }
+                }
                 _ = tokio::signal::ctrl_c() => {
                     info!("Received Ctrl+C, shutting down");
                     break;
@@ -190,6 +193,83 @@ impl Engine {
 
         Ok(())
     }
+}
+
+/// Discover markets for each crypto pair and register assets in the orderbook manager.
+async fn discover_markets(
+    rest_client: &PolymarketRestClient,
+    pairs: &[CryptoPair],
+    ob_manager: &mut OrderbookManager,
+    interval_secs: u64,
+) -> Vec<String> {
+    let mut asset_ids = Vec::new();
+
+    for &crypto in pairs {
+        let slug = build_epoch_slug(crypto, interval_secs);
+        info!(pair = %crypto, slug = %slug, "Looking up market");
+
+        match rest_client.get_market_by_slug(&slug).await {
+            Ok(market) => {
+                info!(
+                    pair = %crypto,
+                    question = %market.question,
+                    active = market.active,
+                    tokens = ?market.clob_token_ids,
+                    "Discovered market"
+                );
+                for (asset_id, asset_info) in market.extract_assets(crypto) {
+                    info!(asset_id = %asset_id, info = %asset_info, "Registered asset");
+                    ob_manager.register_asset(&market.id, &asset_id, asset_info);
+                    asset_ids.push(asset_id);
+                }
+            }
+            Err(e) => {
+                warn!(pair = %crypto, slug = %slug, error = %e, "Failed to fetch market, continuing without it");
+            }
+        }
+    }
+
+    asset_ids
+}
+
+/// Spawn a Polymarket WS task for the given asset IDs.
+fn spawn_poly_ws(
+    asset_ids: Vec<String>,
+    ob_tx: &mpsc::Sender<OrderbookEvent>,
+) -> Option<JoinHandle<()>> {
+    if asset_ids.is_empty() {
+        info!("No Polymarket asset IDs discovered, skipping WS subscription");
+        return None;
+    }
+
+    let poly_ws = PolymarketWsClient::new(asset_ids);
+    let ob_tx_clone = ob_tx.clone();
+    Some(tokio::spawn(async move {
+        if let Err(e) = poly_ws.subscribe(ob_tx_clone).await {
+            error!(error = %e, "Polymarket WS task failed");
+        }
+    }))
+}
+
+/// Get the current epoch start timestamp.
+fn current_epoch_secs(interval_secs: u64) -> u64 {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    (now / interval_secs) * interval_secs
+}
+
+/// Compute a tokio deadline for the next epoch boundary.
+fn next_epoch_deadline(interval_secs: u64) -> tokio::time::Instant {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let epoch_start = (now / interval_secs) * interval_secs;
+    let next_epoch = epoch_start + interval_secs;
+    let secs_until = next_epoch - now;
+    tokio::time::Instant::now() + Duration::from_secs(secs_until)
 }
 
 /// Check if strategies should be active based on the current position within

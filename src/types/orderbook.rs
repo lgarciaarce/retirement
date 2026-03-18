@@ -163,6 +163,13 @@ impl OrderbookManager {
         self.market_assets.keys()
     }
 
+    /// Clear all orderbook state — used when rolling to a new market epoch.
+    pub fn clear(&mut self) {
+        self.books.clear();
+        self.assets.clear();
+        self.market_assets.clear();
+    }
+
     fn resolve_info(&self, asset_id: &str) -> AssetInfo {
         self.assets.get(asset_id).copied().unwrap_or(AssetInfo {
             crypto: crate::types::CryptoPair::Btc,
