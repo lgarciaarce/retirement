@@ -4,7 +4,7 @@ use serde_json::json;
 use tokio::sync::mpsc;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::error::Result;
 use crate::sources::OrderbookSource;
@@ -76,7 +76,7 @@ impl OrderbookSource for PolymarketWsClient {
                                     match serde_json::from_str::<PolymarketWsEvent>(&text) {
                                         Ok(event) => {
                                             for ob_event in event.into_orderbook_events() {
-                                                debug!("{}", ob_event);
+                                                trace!("{}", ob_event);
                                                 if sender.send(ob_event).await.is_err() {
                                                     info!("Orderbook channel closed, stopping Polymarket WS");
                                                     ping_handle.abort();

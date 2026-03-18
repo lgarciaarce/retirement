@@ -1,14 +1,14 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::config::settings::{AppConfig, OperationMode, TokenPairConfig};
 use crate::error::Result;
 use crate::sources::binance::BinanceWsClient;
 use crate::sources::polymarket::{PolymarketRestClient, PolymarketWsClient};
 use crate::sources::{MarketClient, OrderbookSource, PriceSource};
-use crate::types::{OrderbookEvent, PriceTick};
+use crate::types::{OrderbookEvent, OrderbookManager, PriceTick};
 
 pub struct Engine {
     config: AppConfig,
@@ -83,6 +83,8 @@ impl Engine {
         drop(tick_tx);
         drop(ob_tx);
 
+        let mut ob_manager = OrderbookManager::new();
+
         info!("Engine running. Press Ctrl+C to stop.");
 
         // Main event loop
@@ -92,7 +94,10 @@ impl Engine {
                     debug!("Tick: {}", tick);
                 }
                 Some(ob) = ob_rx.recv() => {
-                    debug!("OB: {}", ob);
+                    trace!("OB event: {}", ob);
+                    if let Some(snap) = ob_manager.apply(&ob) {
+                        debug!("Orderbook updated:\n{}", snap);
+                    }
                 }
                 _ = tokio::signal::ctrl_c() => {
                     info!("Received Ctrl+C, shutting down");

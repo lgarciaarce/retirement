@@ -1,9 +1,127 @@
+use std::collections::HashMap;
 use std::fmt;
 
 #[derive(Debug, Clone)]
 pub struct PriceLevel {
     pub price: f64,
     pub size: f64,
+}
+
+/// Maintained orderbook state for a single asset.
+/// Bids sorted descending, asks sorted ascending by price.
+#[derive(Debug, Clone)]
+pub struct OrderbookSnapshot {
+    pub asset_id: String,
+    pub bids: Vec<PriceLevel>,
+    pub asks: Vec<PriceLevel>,
+}
+
+impl OrderbookSnapshot {
+    pub fn new(asset_id: String) -> Self {
+        Self {
+            asset_id,
+            bids: Vec::new(),
+            asks: Vec::new(),
+        }
+    }
+
+    pub fn replace(&mut self, bids: Vec<PriceLevel>, asks: Vec<PriceLevel>) {
+        self.bids = bids;
+        self.asks = asks;
+        self.sort();
+    }
+
+    /// Apply a single level update. size=0 removes the level.
+    pub fn apply_level(&mut self, price: f64, size: f64, side: &str) {
+        let levels = if side == "BUY" {
+            &mut self.bids
+        } else {
+            &mut self.asks
+        };
+
+        if let Some(pos) = levels.iter().position(|l| (l.price - price).abs() < 1e-9) {
+            if size == 0.0 {
+                levels.remove(pos);
+            } else {
+                levels[pos].size = size;
+            }
+        } else if size > 0.0 {
+            levels.push(PriceLevel { price, size });
+            // Re-sort only the affected side
+            if side == "BUY" {
+                self.bids.sort_by(|a, b| b.price.partial_cmp(&a.price).unwrap());
+            } else {
+                self.asks.sort_by(|a, b| a.price.partial_cmp(&b.price).unwrap());
+            }
+        }
+    }
+
+    pub fn best_bid(&self) -> Option<&PriceLevel> {
+        self.bids.first()
+    }
+
+    pub fn best_ask(&self) -> Option<&PriceLevel> {
+        self.asks.first()
+    }
+
+    fn sort(&mut self) {
+        self.bids.sort_by(|a, b| b.price.partial_cmp(&a.price).unwrap());
+        self.asks.sort_by(|a, b| a.price.partial_cmp(&b.price).unwrap());
+    }
+}
+
+impl fmt::Display for OrderbookSnapshot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let bid_str = self.best_bid().map(|l| format!("{:.2}", l.price)).unwrap_or("-".into());
+        let ask_str = self.best_ask().map(|l| format!("{:.2}", l.price)).unwrap_or("-".into());
+
+        writeln!(f, "  Orderbook {} | best_bid={} best_ask={}", &self.asset_id[..8.min(self.asset_id.len())], bid_str, ask_str)?;
+
+        let depth = 5.min(self.bids.len().max(self.asks.len()));
+        writeln!(f, "  {:>12} {:>12} | {:>12} {:>12}", "BID_SZ", "BID_PX", "ASK_PX", "ASK_SZ")?;
+        for i in 0..depth {
+            let bid = self.bids.get(i);
+            let ask = self.asks.get(i);
+            let bid_sz = bid.map(|l| format!("{:.2}", l.size)).unwrap_or_default();
+            let bid_px = bid.map(|l| format!("{:.2}", l.price)).unwrap_or_default();
+            let ask_px = ask.map(|l| format!("{:.2}", l.price)).unwrap_or_default();
+            let ask_sz = ask.map(|l| format!("{:.2}", l.size)).unwrap_or_default();
+            writeln!(f, "  {:>12} {:>12} | {:>12} {:>12}", bid_sz, bid_px, ask_px, ask_sz)?;
+        }
+        if self.bids.len() > depth || self.asks.len() > depth {
+            writeln!(f, "  ... +{} bids, +{} asks", self.bids.len().saturating_sub(depth), self.asks.len().saturating_sub(depth))?;
+        }
+        Ok(())
+    }
+}
+
+/// Manages orderbook snapshots for all subscribed assets.
+#[derive(Default)]
+pub struct OrderbookManager {
+    books: HashMap<String, OrderbookSnapshot>,
+}
+
+impl OrderbookManager {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Apply an event and return the updated snapshot for debug logging.
+    pub fn apply(&mut self, event: &OrderbookEvent) -> Option<&OrderbookSnapshot> {
+        match event {
+            OrderbookEvent::Snapshot { asset_id, bids, asks, .. } => {
+                let snap = self.books.entry(asset_id.clone()).or_insert_with(|| OrderbookSnapshot::new(asset_id.clone()));
+                snap.replace(bids.clone(), asks.clone());
+                Some(snap)
+            }
+            OrderbookEvent::PriceChange { asset_id, price, size, side, .. } => {
+                let snap = self.books.entry(asset_id.clone()).or_insert_with(|| OrderbookSnapshot::new(asset_id.clone()));
+                snap.apply_level(*price, *size, side);
+                Some(snap)
+            }
+            OrderbookEvent::LastTrade { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
