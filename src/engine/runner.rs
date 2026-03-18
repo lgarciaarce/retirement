@@ -94,12 +94,12 @@ impl Engine {
         loop {
             tokio::select! {
                 Some(tick) = tick_rx.recv() => {
-                    debug!("Tick: {}", tick);
+                    trace!("Tick: {}", tick);
                 }
                 Some(ob) = ob_rx.recv() => {
                     trace!("OB event: {}", ob);
                     if let Some(snap) = ob_manager.apply(&ob) {
-                        debug!("Orderbook updated:\n{}", snap);
+                        trace!("Orderbook updated:\n{}", snap);
                     }
                 }
                 _ = tokio::signal::ctrl_c() => {

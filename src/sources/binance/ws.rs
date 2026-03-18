@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tokio_tungstenite::connect_async;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{error, info, trace, warn};
 
 use crate::error::Result;
 use crate::sources::PriceSource;

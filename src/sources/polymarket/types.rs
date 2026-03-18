@@ -59,7 +59,9 @@ impl GammaMarketResponse {
     }
 }
 
-/// Polymarket WS events — tagged by event type
+/// Polymarket WS events — tagged by event type.
+/// Unknown fields are silently ignored (deny_unknown_fields is NOT set)
+/// since the API sends extra fields like `hash`, `tick_size`, `last_trade_price` on book events.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "event_type")]
 pub enum PolymarketWsEvent {
@@ -94,6 +96,19 @@ pub enum PolymarketWsEvent {
         new_tick_size: String,
         timestamp: Option<String>,
     },
+}
+
+/// Parse a WS text message, which may be a single event object or an array of events.
+pub fn parse_ws_message(text: &str) -> Vec<PolymarketWsEvent> {
+    // Try as array first (most common from the WS)
+    if let Ok(events) = serde_json::from_str::<Vec<PolymarketWsEvent>>(text) {
+        return events;
+    }
+    // Fall back to single object
+    if let Ok(event) = serde_json::from_str::<PolymarketWsEvent>(text) {
+        return vec![event];
+    }
+    vec![]
 }
 
 #[derive(Debug, Deserialize)]

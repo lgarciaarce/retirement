@@ -10,7 +10,7 @@ use crate::error::Result;
 use crate::sources::OrderbookSource;
 use crate::types::OrderbookEvent;
 
-use super::types::PolymarketWsEvent;
+use super::types::parse_ws_message;
 
 const POLYMARKET_WS_URL: &str = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 const RECONNECT_DELAY_MS: u64 = 3000;
@@ -73,19 +73,18 @@ impl OrderbookSource for PolymarketWsClient {
                             Some(Ok(msg)) => {
                                 if msg.is_text() {
                                     let text = msg.into_text().unwrap_or_default();
-                                    match serde_json::from_str::<PolymarketWsEvent>(&text) {
-                                        Ok(event) => {
-                                            for ob_event in event.into_orderbook_events() {
-                                                trace!("{}", ob_event);
-                                                if sender.send(ob_event).await.is_err() {
-                                                    info!("Orderbook channel closed, stopping Polymarket WS");
-                                                    ping_handle.abort();
-                                                    return Ok(());
-                                                }
+                                    let events = parse_ws_message(&text);
+                                    if events.is_empty() {
+                                        trace!(raw = %text, "Ignoring unrecognized Polymarket message");
+                                    }
+                                    for event in events {
+                                        for ob_event in event.into_orderbook_events() {
+                                            trace!("{}", ob_event);
+                                            if sender.send(ob_event).await.is_err() {
+                                                info!("Orderbook channel closed, stopping Polymarket WS");
+                                                ping_handle.abort();
+                                                return Ok(());
                                             }
-                                        }
-                                        Err(e) => {
-                                            warn!(error = %e, raw = %text, "Ignoring non-event Polymarket message");
                                         }
                                     }
                                 }
