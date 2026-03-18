@@ -67,6 +67,18 @@ impl OrderbookSnapshot {
         self.asks.first()
     }
 
+    /// Reconcile local book against the authoritative best bid/ask from the
+    /// exchange. Removes any stale levels that sit above best_bid or below
+    /// best_ask — these are phantom levels from missed cancellation events.
+    pub fn reconcile_best(&mut self, best_bid: Option<f64>, best_ask: Option<f64>) {
+        if let Some(bb) = best_bid {
+            self.bids.retain(|l| l.price <= bb + 1e-9);
+        }
+        if let Some(ba) = best_ask {
+            self.asks.retain(|l| l.price >= ba - 1e-9);
+        }
+    }
+
     fn sort(&mut self) {
         self.bids.sort_by(|a, b| b.price.partial_cmp(&a.price).unwrap());
         self.asks.sort_by(|a, b| a.price.partial_cmp(&b.price).unwrap());
@@ -141,10 +153,11 @@ impl OrderbookManager {
                 snap.replace(bids.clone(), asks.clone());
                 Some(snap)
             }
-            OrderbookEvent::PriceChange { asset_id, price, size, side, .. } => {
+            OrderbookEvent::PriceChange { asset_id, price, size, side, best_bid, best_ask, .. } => {
                 let info = self.resolve_info(asset_id);
                 let snap = self.books.entry(asset_id.clone()).or_insert_with(|| OrderbookSnapshot::new(asset_id.clone(), info));
                 snap.apply_level(*price, *size, side);
+                snap.reconcile_best(*best_bid, *best_ask);
                 Some(snap)
             }
             OrderbookEvent::LastTrade { .. } => None,
@@ -193,8 +206,8 @@ pub enum OrderbookEvent {
         price: f64,
         size: f64,
         side: String,
-        best_bid: f64,
-        best_ask: f64,
+        best_bid: Option<f64>,
+        best_ask: Option<f64>,
         timestamp: Option<String>,
     },
     LastTrade {
@@ -214,7 +227,9 @@ impl fmt::Display for OrderbookEvent {
                 write!(f, "[Snapshot] {} bids={} asks={}", asset_id, bids.len(), asks.len())
             }
             OrderbookEvent::PriceChange { asset_id, price, best_bid, best_ask, side, .. } => {
-                write!(f, "[PriceChange] {} price={:.4} bid={:.4} ask={:.4} side={}", asset_id, price, best_bid, best_ask, side)
+                let bid_str = best_bid.map(|b| format!("{:.4}", b)).unwrap_or_else(|| "-".into());
+                let ask_str = best_ask.map(|a| format!("{:.4}", a)).unwrap_or_else(|| "-".into());
+                write!(f, "[PriceChange] {} price={:.4} bid={} ask={} side={}", asset_id, price, bid_str, ask_str, side)
             }
             OrderbookEvent::LastTrade { asset_id, price, size, side, .. } => {
                 write!(f, "[LastTrade] {} price={:.4} size={:.4} side={}", asset_id, price, size, side)

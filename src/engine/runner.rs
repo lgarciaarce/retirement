@@ -19,7 +19,7 @@ use crate::types::order::{Fill, Order, OrderId, OrderStatus};
 use crate::types::{CryptoPair, OrderbookEvent, OrderbookManager, PriceTick};
 
 const MARKET_INTERVAL_SECS: u64 = 300;
-const STRATEGY_BUFFER_SECS: u64 = 15;
+const STRATEGY_BUFFER_SECS: u64 = 8;
 const INITIAL_BALANCE: f64 = 10_000.0;
 
 pub struct Engine {

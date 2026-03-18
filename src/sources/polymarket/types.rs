@@ -123,8 +123,10 @@ pub struct PolymarketPriceChange {
     pub price: String,
     pub size: String,
     pub side: String,
-    pub best_bid: String,
-    pub best_ask: String,
+    #[serde(default)]
+    pub best_bid: Option<String>,
+    #[serde(default)]
+    pub best_ask: Option<String>,
 }
 
 impl PolymarketWsEvent {
@@ -161,8 +163,8 @@ impl PolymarketWsEvent {
                             price: pc.price.parse().ok()?,
                             size: pc.size.parse().ok()?,
                             side: pc.side,
-                            best_bid: pc.best_bid.parse().ok()?,
-                            best_ask: pc.best_ask.parse().ok()?,
+                            best_bid: pc.best_bid.and_then(|s| s.parse().ok()),
+                            best_ask: pc.best_ask.and_then(|s| s.parse().ok()),
                             timestamp: timestamp.clone(),
                         })
                     })
