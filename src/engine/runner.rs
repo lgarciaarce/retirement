@@ -18,9 +18,17 @@ use crate::strategy::StrategyContext;
 use crate::types::order::{Fill, Order, OrderId, OrderStatus};
 use crate::types::{CryptoPair, OrderbookEvent, OrderbookManager, PriceTick};
 
-const MARKET_INTERVAL_SECS: u64 = 300;
+pub const MARKET_INTERVAL_SECS: u64 = 300;
 const STRATEGY_BUFFER_SECS: u64 = 8;
 const INITIAL_BALANCE: f64 = 10_000.0;
+const STRIKE_RETRY_INTERVAL: Duration = Duration::from_secs(3);
+
+/// Pair whose strike price hasn't been resolved yet.
+struct PendingStrike {
+    crypto: CryptoPair,
+    event_start_time: String,
+    end_date: String,
+}
 
 pub struct Engine {
     config: AppConfig,
@@ -43,7 +51,7 @@ impl Engine {
         let mut ob_manager = OrderbookManager::new();
 
         // Initial market discovery
-        let asset_ids = discover_markets(
+        let (asset_ids, mut pending_strikes) = discover_markets(
             &rest_client,
             &self.config.pairs,
             &mut ob_manager,
@@ -80,6 +88,11 @@ impl Engine {
         let mut portfolio = InMemoryPortfolio::new(INITIAL_BALANCE);
         let mut next_order_id: u64 = 1;
         let mut was_active = false;
+
+        // Interval timer for retrying unresolved strike prices.
+        // Uses an Interval (not sleep) so it survives across select! iterations.
+        let mut strike_retry_timer = tokio::time::interval(STRIKE_RETRY_INTERVAL);
+        strike_retry_timer.reset(); // don't fire immediately
 
         info!(
             balance = INITIAL_BALANCE,
@@ -136,6 +149,14 @@ impl Engine {
                     debug!(fill = %fill, "Fill received");
                     portfolio.apply_fill(&fill);
                 }
+                _ = strike_retry_timer.tick(), if !pending_strikes.is_empty() => {
+                    pending_strikes = retry_pending_strikes(
+                        &rest_client,
+                        pending_strikes,
+                        MARKET_INTERVAL_SECS,
+                    )
+                    .await;
+                }
                 _ = tokio::time::sleep_until(epoch_deadline) => {
                     let new_epoch = current_epoch_secs(MARKET_INTERVAL_SECS);
                     if new_epoch != current_epoch {
@@ -152,13 +173,15 @@ impl Engine {
                         while ob_rx.try_recv().is_ok() {}
 
                         // Discover new markets
-                        let asset_ids = discover_markets(
+                        let (asset_ids, new_pending) = discover_markets(
                             &rest_client,
                             &self.config.pairs,
                             &mut ob_manager,
                             MARKET_INTERVAL_SECS,
                         )
                         .await;
+                        pending_strikes = new_pending;
+                        strike_retry_timer.reset();
 
                         // Spawn new Polymarket WS
                         poly_ws_handle = spawn_poly_ws(asset_ids, &ob_tx);
@@ -196,24 +219,57 @@ impl Engine {
 }
 
 /// Discover markets for each crypto pair and register assets in the orderbook manager.
+/// Returns (asset_ids, pending_strikes) — pending_strikes lists pairs whose
+/// strike price wasn't available yet and should be retried.
 async fn discover_markets(
     rest_client: &PolymarketRestClient,
     pairs: &[CryptoPair],
     ob_manager: &mut OrderbookManager,
     interval_secs: u64,
-) -> Vec<String> {
+) -> (Vec<String>, Vec<PendingStrike>) {
     let mut asset_ids = Vec::new();
+    let mut pending = Vec::new();
+    let (_, variant) = interval_config(interval_secs);
 
     for &crypto in pairs {
         let slug = build_epoch_slug(crypto, interval_secs);
         info!(pair = %crypto, slug = %slug, "Looking up market");
 
         match rest_client.get_market_by_slug(&slug).await {
-            Ok(market) => {
+            Ok(mut market) => {
+                // Fetch the strike price from the crypto-price API
+                let symbol = format!("{}", crypto); // "BTC", "ETH", etc.
+                match rest_client
+                    .get_crypto_price(&symbol, &market.event_start_time, &market.end_date, variant)
+                    .await
+                {
+                    Ok(Some(price)) => {
+                        market.strike_price = Some(price);
+                        debug!(pair = %crypto, strike_price = price, "Strike price (openPrice) available");
+                    }
+                    Ok(None) => {
+                        warn!(pair = %crypto, "No strike price yet — will retry");
+                        pending.push(PendingStrike {
+                            crypto,
+                            event_start_time: market.event_start_time.clone(),
+                            end_date: market.end_date.clone(),
+                        });
+                    }
+                    Err(e) => {
+                        warn!(pair = %crypto, error = %e, "Failed to fetch crypto price — will retry");
+                        pending.push(PendingStrike {
+                            crypto,
+                            event_start_time: market.event_start_time.clone(),
+                            end_date: market.end_date.clone(),
+                        });
+                    }
+                }
+
                 info!(
                     pair = %crypto,
                     question = %market.question,
                     active = market.active,
+                    strike_price = ?market.strike_price,
                     tokens = ?market.clob_token_ids,
                     "Discovered market"
                 );
@@ -229,7 +285,40 @@ async fn discover_markets(
         }
     }
 
-    asset_ids
+    (asset_ids, pending)
+}
+
+/// Retry fetching strike prices for pending pairs.
+/// Returns only those still unresolved.
+async fn retry_pending_strikes(
+    rest_client: &PolymarketRestClient,
+    pending: Vec<PendingStrike>,
+    interval_secs: u64,
+) -> Vec<PendingStrike> {
+    let (_, variant) = interval_config(interval_secs);
+    let mut still_pending = Vec::new();
+
+    for p in pending {
+        let symbol = format!("{}", p.crypto);
+        match rest_client
+            .get_crypto_price(&symbol, &p.event_start_time, &p.end_date, variant)
+            .await
+        {
+            Ok(Some(price)) => {
+                info!(pair = %p.crypto, strike_price = price, "Strike price resolved on retry");
+            }
+            Ok(None) => {
+                debug!(pair = %p.crypto, "Strike price still unavailable");
+                still_pending.push(p);
+            }
+            Err(e) => {
+                warn!(pair = %p.crypto, error = %e, "Strike price retry failed");
+                still_pending.push(p);
+            }
+        }
+    }
+
+    still_pending
 }
 
 /// Spawn a Polymarket WS task for the given asset IDs.
@@ -252,7 +341,7 @@ fn spawn_poly_ws(
 }
 
 /// Get the current epoch start timestamp.
-fn current_epoch_secs(interval_secs: u64) -> u64 {
+pub fn current_epoch_secs(interval_secs: u64) -> u64 {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -285,19 +374,19 @@ fn is_strategy_window_active(interval_secs: u64, buffer_secs: u64) -> bool {
     elapsed >= buffer_secs && elapsed <= interval_secs - buffer_secs
 }
 
+/// Slug label and crypto-price API variant for a given interval.
+/// Kept together so they stay in sync if new intervals are added.
+pub fn interval_config(interval_secs: u64) -> (&'static str, &'static str) {
+    match interval_secs {
+        300 => ("5m", "fiveminute"),
+        900 => ("15m", "fifteenminute"),
+        _ => ("5m", "fiveminute"),
+    }
+}
+
 /// Build the epoch slug for a given pair and interval.
-fn build_epoch_slug(crypto: CryptoPair, interval_secs: u64) -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let epoch = (now / interval_secs) * interval_secs;
-
-    let interval_label = match interval_secs {
-        300 => "5m",
-        900 => "15m",
-        _ => "5m",
-    };
-
-    format!("{}-{}-{}", crypto.slug_prefix(), interval_label, epoch)
+pub fn build_epoch_slug(crypto: CryptoPair, interval_secs: u64) -> String {
+    let epoch = current_epoch_secs(interval_secs);
+    let (label, _) = interval_config(interval_secs);
+    format!("{}-{}-{}", crypto.slug_prefix(), label, epoch)
 }

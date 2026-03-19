@@ -108,6 +108,13 @@ pub struct Market {
     pub clob_token_ids: Vec<String>,
     pub active: bool,
     pub closed: bool,
+    /// ISO-8601 round start time (e.g. "2026-03-19T10:05:00Z").
+    pub event_start_time: String,
+    /// ISO-8601 round end time (e.g. "2026-03-19T10:10:00Z").
+    pub end_date: String,
+    /// The reference/opening price for up/down resolution, fetched from the
+    /// crypto-price API (`openPrice`). Only present after the round has started.
+    pub strike_price: Option<f64>,
 }
 
 impl Market {

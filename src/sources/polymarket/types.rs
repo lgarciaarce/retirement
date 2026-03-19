@@ -20,6 +20,10 @@ pub struct GammaMarketResponse {
     pub clob_token_ids: Option<String>,
     pub active: Option<bool>,
     pub closed: Option<bool>,
+    /// ISO-8601 timestamp for when the round begins (e.g. "2026-03-19T10:05:00Z").
+    pub event_start_time: Option<String>,
+    /// ISO-8601 timestamp for when the round ends (e.g. "2026-03-19T10:10:00Z").
+    pub end_date: Option<String>,
 }
 
 impl GammaMarketResponse {
@@ -55,8 +59,21 @@ impl GammaMarketResponse {
             clob_token_ids,
             active: self.active.unwrap_or(false),
             closed: self.closed.unwrap_or(false),
+            event_start_time: self.event_start_time.unwrap_or_default(),
+            end_date: self.end_date.unwrap_or_default(),
+            strike_price: None,
         })
     }
+}
+
+/// Response from the crypto-price API.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CryptoPriceResponse {
+    pub open_price: Option<f64>,
+    pub close_price: Option<f64>,
+    pub completed: bool,
+    pub incomplete: bool,
 }
 
 /// Polymarket WS events — tagged by event type.
