@@ -94,6 +94,11 @@ impl Engine {
         let mut strike_retry_timer = tokio::time::interval(STRIKE_RETRY_INTERVAL);
         strike_retry_timer.reset(); // don't fire immediately
 
+        // Compute the next epoch boundary once; only update after a roll.
+        // sleep_until with a past instant resolves immediately, so once the
+        // boundary passes this arm will fire on the next select! poll.
+        let mut epoch_deadline = next_epoch_deadline(MARKET_INTERVAL_SECS);
+
         info!(
             balance = INITIAL_BALANCE,
             buffer_secs = STRATEGY_BUFFER_SECS,
@@ -114,8 +119,6 @@ impl Engine {
                 }
                 was_active = active;
             }
-
-            let epoch_deadline = next_epoch_deadline(MARKET_INTERVAL_SECS);
 
             tokio::select! {
                 Some(tick) = tick_rx.recv() => {
@@ -186,6 +189,9 @@ impl Engine {
                         // Spawn new Polymarket WS
                         poly_ws_handle = spawn_poly_ws(asset_ids, &ob_tx);
                     }
+
+                    // Recompute deadline for the next epoch boundary
+                    epoch_deadline = next_epoch_deadline(MARKET_INTERVAL_SECS);
                 }
                 _ = tokio::signal::ctrl_c() => {
                     info!("Received Ctrl+C, shutting down");
