@@ -44,7 +44,7 @@ impl Strategy for ArbLoggerStrategy {
                 (Some(u), Some(d)) => (u, d),
                 _ => continue,
             };
-            debug!("HERE");
+
             // Buy arb: cost to buy both sides < 1.0
             if let (Some(up_ask), Some(down_ask)) = (up.best_ask(), down.best_ask()) {
                 let buy_combo = up_ask.price + down_ask.price;

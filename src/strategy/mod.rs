@@ -1,6 +1,5 @@
 pub mod arb_logger;
 pub mod registry;
-pub mod spread_logger;
 
 use crate::portfolio::PortfolioReader;
 use crate::types::order::OrderRequest;
