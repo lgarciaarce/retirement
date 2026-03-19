@@ -14,9 +14,10 @@ async fn main() {
 
     let cli = Cli::parse();
 
-    // Init tracing with env-filter; RUST_LOG overrides --log-level
+    // Init tracing with env-filter; RUST_LOG overrides --log-level.
+    // Default: warn for external deps, --log-level for this crate.
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(&cli.log_level));
+        .unwrap_or_else(|_| EnvFilter::new(format!("warn,retirement={}", cli.log_level)));
 
     tracing_subscriber::fmt()
         .with_env_filter(filter)
